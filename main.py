@@ -1,174 +1,167 @@
-import os
 import requests
-from telegram import Update
-from telegram.ext import Application, CommandHandler, ContextTypes
+import json
+import os
+from telegram import Update, ParseMode
+from telegram.ext import Updater, CommandHandler, CallbackContext
 from keep_alive import keep_alive
 
-# --- Your Bot Token (from BotFather) ---
-BOT_TOKEN = "YOUR_BOT_TOKEN_HERE"
+# ======================
+# 🔧 CONFIG
+# ======================
+BOT_TOKEN = "YOUR_TELEGRAM_BOT_TOKEN"   # put your bot token here
+ADMIN_ID = 123456789                    # replace with your Telegram user ID
+USERS_FILE = "users.json"
 
-# --- Your Telegram ID (find via @userinfobot) ---
-ADMIN_ID = 123456789  # replace with your Telegram numeric ID
+# ======================
+# 📂 USER STORAGE
+# ======================
+def load_users():
+    if os.path.exists(USERS_FILE):
+        with open(USERS_FILE, "r") as f:
+            return json.load(f)
+    return []
 
-# Storage for chat IDs
-USERS_FILE = "users.txt"
+def save_users(users):
+    with open(USERS_FILE, "w") as f:
+        json.dump(users, f)
 
-def save_user(chat_id):
-    if not os.path.exists(USERS_FILE):
-        with open(USERS_FILE, "w") as f:
-            pass
-    with open(USERS_FILE, "r") as f:
-        users = f.read().splitlines()
-    if str(chat_id) not in users:
-        with open(USERS_FILE, "a") as f:
-            f.write(f"{chat_id}\n")
+# ======================
+# 📊 CRYPTO FUNCTIONS
+# ======================
+def get_price(symbol: str):
+    symbol = symbol.upper()
+    try:
+        # Binance price + 24hr stats
+        price_data = requests.get(f"https://api.binance.com/api/v3/ticker/price?symbol={symbol}USDT").json()
+        stats_data = requests.get(f"https://api.binance.com/api/v3/ticker/24hr?symbol={symbol}USDT").json()
 
-def get_users():
-    if not os.path.exists(USERS_FILE):
-        return []
-    with open(USERS_FILE, "r") as f:
-        return f.read().splitlines()
+        usd_price = float(price_data["price"])
+        change = stats_data.get("priceChangePercent", "N/A")
+        high = stats_data.get("highPrice", "N/A")
+        low = stats_data.get("lowPrice", "N/A")
+        volume = stats_data.get("volume", "N/A")
 
-# Binance + Forex API
-BINANCE_URL = "https://api.binance.com/api/v3"
-FOREX_URL = "https://api.exchangerate.host/latest"
+        # USD → INR conversion
+        forex = requests.get("https://api.exchangerate-api.com/v4/latest/USD").json()
+        usd_to_inr = forex["rates"]["INR"]
+        inr_price = usd_price * usd_to_inr
 
-# --- Get Live Price + 24h Stats ---
-def get_crypto_stats(symbol="BTCUSDT"):
-    url = f"{BINANCE_URL}/ticker/24hr?symbol={symbol.upper()}"
-    r = requests.get(url)
-    if r.status_code != 200:
-        return None
-    
-    data = r.json()
-    return {
-        "price": float(data["lastPrice"]),
-        "change_percent": float(data["priceChangePercent"]),
-        "high": float(data["highPrice"]),
-        "low": float(data["lowPrice"]),
-        "volume": float(data["volume"])
-    }
+        return f"""
+💰 <b>{symbol} Price</b>
+USD: ${usd_price:,.2f}
+INR: ₹{inr_price:,.2f}
 
-# --- Crypto → Crypto Conversion ---
-def convert_crypto(amount, from_coin, to_coin):
-    pair = f"{from_coin.upper()}{to_coin.upper()}"
-    url = f"{BINANCE_URL}/ticker/price?symbol={pair}"
-    r = requests.get(url)
-    if r.status_code != 200:
-        return None
-    rate = float(r.json()["price"])
-    return amount * rate
+📊 24h Change: {change}%
+🔼 High: {high}
+🔽 Low: {low}
+📦 Volume: {volume}
+"""
+    except Exception as e:
+        return "⚠️ Error: Invalid symbol or API issue."
 
-# --- Crypto → USD ---
-def crypto_to_usd(amount, coin):
-    pair = f"{coin.upper()}USDT"
-    url = f"{BINANCE_URL}/ticker/price?symbol={pair}"
-    r = requests.get(url)
-    if r.status_code != 200:
-        return None
-    price = float(r.json()["price"])
-    return amount * price
+def convert_crypto(amount: float, from_symbol: str, to_symbol: str):
+    try:
+        from_symbol = from_symbol.upper()
+        to_symbol = to_symbol.upper()
 
-# --- Crypto → INR ---
-def crypto_to_inr(amount, coin):
-    usd_value = crypto_to_usd(amount, coin)
-    if usd_value is None:
-        return None
-    r = requests.get(f"{FOREX_URL}?base=USD&symbols=INR")
-    if r.status_code != 200:
-        return None
-    usd_inr = r.json()["rates"]["INR"]
-    return usd_value * usd_inr
+        from_price = float(requests.get(f"https://api.binance.com/api/v3/ticker/price?symbol={from_symbol}USDT").json()["price"])
+        to_price = float(requests.get(f"https://api.binance.com/api/v3/ticker/price?symbol={to_symbol}USDT").json()["price"])
 
+        result = (amount * from_price) / to_price
+        return f"🔄 {amount} {from_symbol} = {result:.6f} {to_symbol}"
+    except:
+        return "⚠️ Conversion failed. Check symbols."
 
-# --- Bot Commands ---
+# ======================
+# 🤖 COMMAND HANDLERS
+# ======================
+def start(update: Update, context: CallbackContext):
+    user_id = update.message.chat_id
+    users = load_users()
+    if user_id not in users:
+        users.append(user_id)
+        save_users(users)
 
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    chat_id = update.message.chat_id
-    save_user(chat_id)
-    await update.message.reply_text("👋 Welcome! Use /price BTC or /convert 2 ETH BTC")
-
-async def price(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if len(context.args) == 0:
-        await update.message.reply_text("Usage: /price BTC")
-        return
-    
-    coin = context.args[0].upper()
-    stats = get_crypto_stats(f"{coin}USDT")
-    if not stats:
-        await update.message.reply_text("❌ Invalid symbol")
-        return
-
-    inr_value = crypto_to_inr(1, coin)
-    msg = (
-        f"💰 {coin}\n"
-        f"Price: ${stats['price']:.2f} | ₹{inr_value:.2f}\n"
-        f"24h: {stats['change_percent']}%\n"
-        f"High: ${stats['high']:.2f} | Low: ${stats['low']:.2f}\n"
-        f"Volume: {stats['volume']:.2f}"
+    update.message.reply_text(
+        "👋 Welcome to the Crypto Bot!\n\n"
+        "Type /help to see what I can do."
     )
-    await update.message.reply_text(msg)
 
-async def convert(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if len(context.args) < 3:
-        await update.message.reply_text("Usage: /convert 2 ETH BTC or /convert 1 ETH USD/INR")
+def help_command(update: Update, context: CallbackContext):
+    update.message.reply_text(
+        """
+📖 <b>Commands</b>
+
+/price BTC → Get live price of Bitcoin
+/price ETH → Get live price of Ethereum
+/convert 2 ETH BTC → Convert 2 ETH into BTC
+/convert 100 DOGE USD → Convert Doge into USD
+
+(Admin only)
+/broadcast <msg> → Send message to all users
+""",
+        parse_mode=ParseMode.HTML,
+    )
+
+def price_command(update: Update, context: CallbackContext):
+    if len(context.args) == 0:
+        update.message.reply_text("⚠️ Usage: /price BTC")
         return
-    
+    symbol = context.args[0]
+    result = get_price(symbol)
+    update.message.reply_text(result, parse_mode=ParseMode.HTML)
+
+def convert_command(update: Update, context: CallbackContext):
+    if len(context.args) < 3:
+        update.message.reply_text("⚠️ Usage: /convert <amount> <from> <to>")
+        return
     try:
         amount = float(context.args[0])
-    except:
-        await update.message.reply_text("❌ Invalid amount")
+        from_symbol = context.args[1]
+        to_symbol = context.args[2]
+        result = convert_crypto(amount, from_symbol, to_symbol)
+        update.message.reply_text(result)
+    except ValueError:
+        update.message.reply_text("⚠️ Amount must be a number.")
+
+def broadcast(update: Update, context: CallbackContext):
+    if update.message.chat_id != ADMIN_ID:
+        update.message.reply_text("⛔ Not authorized.")
         return
 
-    from_coin = context.args[1].upper()
-    to_coin = context.args[2].upper()
-
-    if to_coin == "USD":
-        result = crypto_to_usd(amount, from_coin)
-    elif to_coin == "INR":
-        result = crypto_to_inr(amount, from_coin)
-    else:
-        result = convert_crypto(amount, from_coin, to_coin)
-
-    if result is None:
-        await update.message.reply_text("❌ Conversion failed")
-    else:
-        await update.message.reply_text(f"🔄 {amount} {from_coin} = {result:.6f} {to_coin}")
-
-# --- Admin Broadcast Command ---
-async def broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.message.from_user.id != ADMIN_ID:
-        await update.message.reply_text("⛔ You are not allowed to use this command.")
+    if not context.args:
+        update.message.reply_text("⚠️ Usage: /broadcast <message>")
         return
-    
-    if len(context.args) == 0:
-        await update.message.reply_text("Usage: /broadcast Your message here")
-        return
-    
+
     message = " ".join(context.args)
-    users = get_users()
-    success, fail = 0, 0
+    users = load_users()
 
+    sent = 0
     for user in users:
         try:
-            await context.bot.send_message(chat_id=int(user), text=message)
-            success += 1
+            context.bot.send_message(chat_id=user, text=f"📢 {message}")
+            sent += 1
         except:
-            fail += 1
-    
-    await update.message.reply_text(f"✅ Sent to {success} users, ❌ Failed {fail}")
+            pass
 
-# --- Main ---
+    update.message.reply_text(f"✅ Broadcast sent to {sent} users.")
+
+# ======================
+# 🚀 MAIN
+# ======================
 def main():
-    app = Application.builder().token(BOT_TOKEN).build()
-
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("price", price))
-    app.add_handler(CommandHandler("convert", convert))
-    app.add_handler(CommandHandler("broadcast", broadcast))  # admin only
-
     keep_alive()  # keep bot alive on Replit
-    app.run_polling()
+    updater = Updater(BOT_TOKEN, use_context=True)
+    dp = updater.dispatcher
+
+    dp.add_handler(CommandHandler("start", start))
+    dp.add_handler(CommandHandler("help", help_command))
+    dp.add_handler(CommandHandler("price", price_command))
+    dp.add_handler(CommandHandler("convert", convert_command))
+    dp.add_handler(CommandHandler("broadcast", broadcast, run_async=True))
+
+    updater.start_polling()
+    updater.idle()
 
 if __name__ == "__main__":
     main()
